@@ -61,30 +61,39 @@ class WanT2V:
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
+        self.checkpoint_dir = checkpoint_dir
+        self.use_usp = use_usp
+        self.dit_fsdp = dit_fsdp
 
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
+        self.sp_size = 1
 
-        shard_fn = partial(shard_model, device_id=device_id)
+        self.shard_fn = partial(shard_model, device_id=device_id)
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
             device=torch.device('cpu'),
             checkpoint_path=os.path.join(checkpoint_dir, config.t5_checkpoint),
             tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
-            shard_fn=shard_fn if t5_fsdp else None)
+            shard_fn=self.shard_fn if t5_fsdp else None)
 
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
         self.vae = WanVAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
+        
+        self.sample_neg_prompt = config.sample_neg_prompt
 
-        logging.info(f"Creating WanModel from {checkpoint_dir}")
-        self.model = WanModel.from_pretrained(checkpoint_dir)
+
+    def init_model(self):
+        logging.info(f"Creating WanModel from {self.checkpoint_dir}")
+        self.model = WanModel.from_pretrained(self.checkpoint_dir)
         self.model.eval().requires_grad_(False)
+        self.use_usp = False
 
-        if use_usp:
+        if self.use_usp:
             from xfuser.core.distributed import \
                 get_sequence_parallel_world_size
 
@@ -100,17 +109,16 @@ class WanT2V:
 
         if dist.is_initialized():
             dist.barrier()
-        if dit_fsdp:
-            self.model = shard_fn(self.model)
-        else:
-            self.model.to(self.device)
+        if self.dit_fsdp:
+            self.model = self.shard_fn(self.model)
+        #else:
+            #self.model.to(self.device)
 
-        self.sample_neg_prompt = config.sample_neg_prompt
 
     def generate(self,
                  input_prompt,
                  size=(1280, 720),
-                 frame_num=81,
+                 frame_num=40,
                  shift=5.0,
                  sample_solver='unipc',
                  sampling_steps=50,
@@ -126,7 +134,7 @@ class WanT2V:
                 Text prompt for content generation
             size (tupele[`int`], *optional*, defaults to (1280,720)):
                 Controls video resolution, (width,height).
-            frame_num (`int`, *optional*, defaults to 81):
+            frame_num (`int`, *optional*, defaults to 40):
                 How many frames to sample from a video. The number should be 4n+1
             shift (`float`, *optional*, defaults to 5.0):
                 Noise schedule shift parameter. Affects temporal dynamics
@@ -168,24 +176,30 @@ class WanT2V:
         seed_g.manual_seed(seed)
 
         if not self.t5_cpu:
+            print("Not t5_cpu")
             self.text_encoder.model.to(self.device)
             context = self.text_encoder([input_prompt], self.device)
             context_null = self.text_encoder([n_prompt], self.device)
             if offload_model:
                 self.text_encoder.model.cpu()
         else:
+            print("t5_cpu")
             context = self.text_encoder([input_prompt], torch.device('cpu'))
             context_null = self.text_encoder([n_prompt], torch.device('cpu'))
             context = [t.to(self.device) for t in context]
             context_null = [t.to(self.device) for t in context_null]
-
-        noise = [
+            
+        self.init_model()
+        
+        # print gpu ram usage
+        print("Noise")
+        latents = [
             torch.randn(
                 target_shape[0],
                 target_shape[1],
                 target_shape[2],
                 target_shape[3],
-                dtype=torch.float32,
+                dtype=torch.bfloat16,
                 device=self.device,
                 generator=seed_g)
         ]
@@ -221,18 +235,17 @@ class WanT2V:
                 raise NotImplementedError("Unsupported solver.")
 
             # sample videos
-            latents = noise
 
             arg_c = {'context': context, 'seq_len': seq_len}
             arg_null = {'context': context_null, 'seq_len': seq_len}
+            print("context")
 
             for _, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
                 timestep = [t]
 
                 timestep = torch.stack(timestep)
-
-                self.model.to(self.device)
+                
                 noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0]
                 noise_pred_uncond = self.model(
@@ -251,11 +264,17 @@ class WanT2V:
 
             x0 = latents
             if offload_model:
+                print("offload_model")
                 self.model.cpu()
+                gc.collect()
+                torch.cuda.synchronize()
+                #sleep 3 seconds
+                os.system('sleep 3')
             if self.rank == 0:
+                print("decoding")
                 videos = self.vae.decode(x0)
 
-        del noise, latents
+        del latents
         del sample_scheduler
         if offload_model:
             gc.collect()

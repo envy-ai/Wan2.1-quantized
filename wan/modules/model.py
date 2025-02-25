@@ -4,6 +4,13 @@ import math
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
+
+import bitsandbytes as bnb
+import os
+import re
+from safetensors.torch import save_file, load_file
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
@@ -618,3 +625,45 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs):
+        """
+        Overloaded from_pretrained to optionally load the model in 4-bit mode and cache it.
+        
+        Args:
+            pretrained_model_name_or_path (str): Path or identifier of the pretrained model.
+            use_4bit (bool): If True, loads the model in 4-bit mode.
+            *args, **kwargs: Other arguments passed to the parent class loader.
+        
+        Returns:
+            An instance of WanModel.
+        """
+        # Create a cache directory for quantized models.
+        cache_dir = "quantized_models"
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Sanitize the model name by stripping out special characters.
+        sanitized_name = re.sub(r"[^a-zA-Z0-9]", "_", pretrained_model_name_or_path)
+        cache_path = os.path.join(cache_dir, sanitized_name)
+        
+        # Append _fp8 or _nf4 to cache_path
+        cache_path += "_nf4"
+        
+        # If a cached quantized model exists, load it.
+        if os.path.exists(cache_path) and os.listdir(cache_path):
+            print(f"Loading cached quantized model from {cache_path}")
+            return super().from_pretrained(cache_path, *args, **kwargs)
+        
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        
+        # Load the model from the original source with the quantization config.
+        model = super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        
+        # Cache the quantized model by saving it to the sanitized path.
+        print(f"Caching quantized model to {cache_path}")
+        model.save_pretrained(cache_path)
+        return model
