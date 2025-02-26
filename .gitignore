@@ -2,7 +2,7 @@
 *.py[cod]
 # *.jpg
 *.jpeg
-# *.png
+./*.png
 *.gif
 *.bmp
 *.mp4
