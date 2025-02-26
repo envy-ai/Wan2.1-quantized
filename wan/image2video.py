@@ -68,6 +68,9 @@ class WanI2V:
         self.rank = rank
         self.use_usp = use_usp
         self.t5_cpu = t5_cpu
+        self.checkpoint_dir = checkpoint_dir
+        self.use_usp = use_usp
+        self.dit_fsdp = dit_fsdp
 
         self.num_train_timesteps = config.num_train_timesteps
         self.param_dtype = config.param_dtype
@@ -95,14 +98,18 @@ class WanI2V:
                                          config.clip_checkpoint),
             tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
 
-        logging.info(f"Creating WanModel from {checkpoint_dir}")
-        self.model = WanModel.from_pretrained(checkpoint_dir)
-        self.model.eval().requires_grad_(False)
-
         if t5_fsdp or dit_fsdp or use_usp:
             init_on_cpu = False
 
-        if use_usp:
+        self.sample_neg_prompt = config.sample_neg_prompt
+    
+    def init_model(self):
+        logging.info(f"Creating WanModel from {self.checkpoint_dir}")
+        self.model = WanModel.from_pretrained(self.checkpoint_dir)
+        self.model.eval().requires_grad_(False)
+        self.use_usp = False
+
+        if self.use_usp:
             from xfuser.core.distributed import \
                 get_sequence_parallel_world_size
 
@@ -118,13 +125,8 @@ class WanI2V:
 
         if dist.is_initialized():
             dist.barrier()
-        if dit_fsdp:
-            self.model = shard_fn(self.model)
-        else:
-            if not init_on_cpu:
-                self.model.to(self.device)
-
-        self.sample_neg_prompt = config.sample_neg_prompt
+        if self.dit_fsdp:
+            self.model = self.shard_fn(self.model)
 
     def generate(self,
                  input_prompt,
@@ -175,7 +177,8 @@ class WanI2V:
                 - W: Frame width from max_area)
         """
         img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device)
-
+        self.sp_size = 1
+        
         F = frame_num
         h, w = img.shape[1:]
         aspect_ratio = h / w
@@ -187,6 +190,7 @@ class WanI2V:
             self.patch_size[2] * self.patch_size[2])
         h = lat_h * self.vae_stride[1]
         w = lat_w * self.vae_stride[2]
+        latent_frames = ((F - 1) // self.vae_stride[0]) + 1
 
         max_seq_len = ((F - 1) // self.vae_stride[0] + 1) * lat_h * lat_w // (
             self.patch_size[1] * self.patch_size[2])
@@ -195,16 +199,16 @@ class WanI2V:
         seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
-        noise = torch.randn(
+        latent = torch.randn(
             16,
-            21,
+            latent_frames,
             lat_h,
             lat_w,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             generator=seed_g,
             device=self.device)
 
-        msk = torch.ones(1, 81, lat_h, lat_w, device=self.device)
+        msk = torch.ones(1, frame_num, lat_h, lat_w, device=self.device)
         msk[:, 1:] = 0
         msk = torch.concat([
             torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]
@@ -239,16 +243,18 @@ class WanI2V:
                 torch.nn.functional.interpolate(
                     img[None].cpu(), size=(h, w), mode='bicubic').transpose(
                         0, 1),
-                torch.zeros(3, 80, h, w)
+                torch.zeros(3, F-1, h, w)
             ],
                          dim=1).to(self.device)
         ])[0]
+        
         y = torch.concat([msk, y])
-
+        
         @contextmanager
         def noop_no_sync():
             yield
 
+        self.init_model()
         no_sync = getattr(self.model, 'no_sync', noop_no_sync)
 
         # evaluation mode
@@ -276,7 +282,6 @@ class WanI2V:
                 raise NotImplementedError("Unsupported solver.")
 
             # sample videos
-            latent = noise
 
             arg_c = {
                 'context': [context[0]],
@@ -294,29 +299,20 @@ class WanI2V:
 
             if offload_model:
                 torch.cuda.empty_cache()
-
-            self.model.to(self.device)
+                
             for _, t in enumerate(tqdm(timesteps)):
-                latent_model_input = [latent.to(self.device)]
+                latent_model_input = [latent]
                 timestep = [t]
 
-                timestep = torch.stack(timestep).to(self.device)
-
+                timestep = torch.stack(timestep)
+                    
                 noise_pred_cond = self.model(
-                    latent_model_input, t=timestep, **arg_c)[0].to(
-                        torch.device('cpu') if offload_model else self.device)
-                if offload_model:
-                    torch.cuda.empty_cache()
+                    latent_model_input, t=timestep, **arg_c)[0]
                 noise_pred_uncond = self.model(
-                    latent_model_input, t=timestep, **arg_null)[0].to(
-                        torch.device('cpu') if offload_model else self.device)
-                if offload_model:
-                    torch.cuda.empty_cache()
+                    latent_model_input, t=timestep, **arg_null)[0]
+
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
-
-                latent = latent.to(
-                    torch.device('cpu') if offload_model else self.device)
 
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),
@@ -332,11 +328,13 @@ class WanI2V:
             if offload_model:
                 self.model.cpu()
                 torch.cuda.empty_cache()
-
+                gc.collect()
+                torch.cuda.synchronize()
+                
             if self.rank == 0:
                 videos = self.vae.decode(x0)
 
-        del noise, latent
+        del latent
         del sample_scheduler
         if offload_model:
             gc.collect()
