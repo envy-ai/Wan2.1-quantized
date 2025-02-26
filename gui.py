@@ -257,8 +257,8 @@ def generate(args):
         # Save settings to a JSON file with the same base name.
         json_filename = os.path.splitext(args.save_file)[0] + ".json"
         # Remove the image from args so it can be serialized.
-        args_copy = args.copy()
-        args_copy.image = None
+        args_copy = vars(args).copy()
+        args_copy["image"] = None
         with open(json_filename, "w", encoding="utf-8") as f:
             json.dump(vars(args_copy), f, ensure_ascii=False, indent=4)
     return args.save_file
@@ -376,8 +376,8 @@ with gr.Blocks() as demo:
                     base_seed = gr.Number(label="Base Seed", value=-1)
                 with gr.Column(min_width="200px"):
                     sample_solver = gr.Dropdown(label="Sample Solver", choices=["unipc", "dpm++"], value="unipc")
-                    sample_steps = gr.Number(label="Sample Steps", value=50)
-                    sample_shift = gr.Number(label="Sample Shift", value=5.0)
+                    sample_steps = gr.Number(label="Sample Steps", value=25)
+                    sample_shift = gr.Number(label="Sample Shift", value=8.0)
                     sample_guide_scale = gr.Number(label="Sample Guide Scale", value=5.0)
                     ulysses_size = gr.Number(label="Ulysses Size", value=1, visible=False)
                     ring_size = gr.Number(label="Ring Size", value=1, visible=False)
