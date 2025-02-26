@@ -35,6 +35,41 @@ EXAMPLE_PROMPT = {
     },
 }
 
+def resize_with_mode(img, target_size, mode):
+    """
+    Resize an image to exactly match target_size (width, height) while maintaining aspect ratio.
+    
+    - In "crop" mode, the image is scaled to fill the target area and then center-cropped.
+    - In "bars" mode, the image is scaled to fit inside the target area and padded with black bars.
+    """
+    if mode == "none":
+        return img
+    
+    target_w, target_h = target_size
+    orig_w, orig_h = img.size
+    if mode == "crop":
+        # Scale so that the image fills the target (may exceed in one dimension)
+        scale = max(target_w / orig_w, target_h / orig_h)
+        new_size = (int(orig_w * scale), int(orig_h * scale))
+        img = img.resize(new_size, Image.LANCZOS)
+        # Center-crop to target dimensions
+        left = (new_size[0] - target_w) // 2
+        top = (new_size[1] - target_h) // 2
+        img = img.crop((left, top, left + target_w, top + target_h))
+    elif mode == "pad":
+        # Scale so that the entire image fits within target dimensions
+        scale = min(target_w / orig_w, target_h / orig_h)
+        new_size = (int(orig_w * scale), int(orig_h * scale))
+        resized_img = img.resize(new_size, Image.LANCZOS)
+        # Create a new black background and paste the resized image centered
+        new_img = Image.new("RGB", (target_w, target_h), (32, 32, 32))
+        left = (target_w - new_size[0]) // 2
+        top = (target_h - new_size[1]) // 2
+        new_img.paste(resized_img, (left, top))
+        img = new_img
+    else:
+        raise ValueError("Unsupported resize mode: " + mode)
+    return img
 
 def _validate_args(args):
     # Basic check
@@ -48,7 +83,7 @@ def _validate_args(args):
 
     if args.sample_shift is None:
         args.sample_shift = 5.0
-        if "i2v" in args.task and args.size in ["832*480", "480*832"]:
+        if "i2v" in args.task and args.size in ["832*480", "480*832", "720*480", "480*720"]:
             args.sample_shift = 3.0
 
     # The default number of frames are 1 for text-to-image tasks and 81 for other tasks.
@@ -63,13 +98,11 @@ def _validate_args(args):
         0, sys.maxsize)
     # Size check
     assert args.size in SUPPORTED_SIZES[
-        args.
-        task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
-
+        args.task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate a image or video from a text prompt or image using Wan"
+        description="Generate an image or video from a text prompt or image using Wan"
     )
     parser.add_argument(
         "--task",
@@ -186,13 +219,20 @@ def _parse_args():
         type=float,
         default=5.0,
         help="Classifier free guidance scale.")
+    # New argument for image resizing mode
+    parser.add_argument(
+        "--resize_mode",
+        type=str,
+        default="none",
+        choices=["none", "crop", "pad"],
+        help="Resize mode for the input image. 'crop' crops the image to fill the target resolution, while 'pad' pads the image with black bars."
+    )
 
     args = parser.parse_args()
 
     _validate_args(args)
 
     return args
-
 
 def _init_logging(rank):
     # logging
@@ -204,7 +244,6 @@ def _init_logging(rank):
             handlers=[logging.StreamHandler(stream=sys.stdout)])
     else:
         logging.basicConfig(level=logging.ERROR)
-
 
 def generate(args):
     rank = int(os.getenv("RANK", 0))
@@ -353,6 +392,18 @@ def generate(args):
             args.prompt = input_prompt[0]
             logging.info(f"Extended prompt: {args.prompt}")
 
+        # Resize the input image to match the target resolution while maintaining aspect ratio
+        target_size = SIZE_CONFIGS[args.size]
+        
+        
+        if args.resize_mode != "none":
+            img = resize_with_mode(img, target_size, args.resize_mode)
+            # Save the resized image (only on rank 0)
+            if rank == 0:
+                resized_img_path = f"resized_{os.path.basename(args.image)}"
+                logging.info(f"Saving resized image to {resized_img_path}")
+                img.save(resized_img_path)
+
         logging.info("Creating WanI2V pipeline.")
         wan_i2v = wan.WanI2V(
             config=cfg,
@@ -404,7 +455,6 @@ def generate(args):
                 normalize=True,
                 value_range=(-1, 1))
     logging.info("Finished.")
-
 
 if __name__ == "__main__":
     args = _parse_args()
