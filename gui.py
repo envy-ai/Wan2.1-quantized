@@ -257,10 +257,10 @@ def generate(args):
         # Save settings to a JSON file with the same base name.
         json_filename = os.path.splitext(args.save_file)[0] + ".json"
         # Remove the image from args so it can be serialized.
-        args_copy = vars(args).copy()
+        args_copy = __builtins__.vars(args).copy()
         args_copy["image"] = None
         with open(json_filename, "w", encoding="utf-8") as f:
-            json.dump(vars(args_copy), f, ensure_ascii=False, indent=4)
+            json.dump(args_copy, f, ensure_ascii=False, indent=4)
     return args.save_file
 
 def run_wan_pipeline(
