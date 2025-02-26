@@ -1,3 +1,11 @@
+Fork use instructions:
+
+<p>To install it, just follow the instructions on <a href='https://huggingface.co/Wan-AI/Wan2.1-T2V-14B'>their huggingface page</a>, except when you check out the github repo, replace it with my fork, here:</p>
+
+<p><a href='https://github.com/envy-ai/Wan2.1-quantized/tree/optimized'>https://github.com/envy-ai/Wan2.1-quantized/tree/optimized</a></p>
+
+<p>Download their official models as instructed. The fork will quantize them and cache them for you.</p>
+
 # Wan2.1
 
 <p align="center">
