@@ -227,6 +227,9 @@ class WanI2V:
             context_null = self.text_encoder([n_prompt], self.device)
             if offload_model:
                 self.text_encoder.model.cpu()
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.synchronize()
         else:
             context = self.text_encoder([input_prompt], torch.device('cpu'))
             context_null = self.text_encoder([n_prompt], torch.device('cpu'))
@@ -237,6 +240,9 @@ class WanI2V:
         clip_context = self.clip.visual([img[:, None, :, :]])
         if offload_model:
             self.clip.model.cpu()
+            torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.synchronize()
 
         y = self.vae.encode([
             torch.concat([

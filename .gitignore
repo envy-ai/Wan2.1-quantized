@@ -3,6 +3,7 @@
 # *.jpg
 *.jpeg
 ./*.png
+./*.jpg
 *.gif
 *.bmp
 *.mp4
